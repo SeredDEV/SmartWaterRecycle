@@ -317,7 +317,49 @@ void loop() {
     if(caudal1 == 0 && caudal2 == 0 && decisionValvulaTomada) {
         if(currentTime - tiempoUltimoFlujo1 > TIMEOUT_FLUJO && 
            currentTime - tiempoUltimoFlujo2 > TIMEOUT_FLUJO) {
-            Serial.println("Flujo detenido - Reiniciando estado");
+            
+            Serial.println("Flujo detenido - Guardando estado final antes de reiniciar");
+            
+            // Guardar un último registro con el cambio de válvulas
+            time_t now;
+            struct tm timeinfo;
+            time(&now);
+            localtime_r(&now, &timeinfo);
+            
+            // Registrar el estado actual antes del cambio
+            strftime(registros[indiceRegistro].timestamp, 25, "%Y-%m-%d %H:%M:%S", &timeinfo);
+            registros[indiceRegistro].turbidez = voltage;
+            registros[indiceRegistro].calidad = calidad;
+            registros[indiceRegistro].caudal1 = 0;
+            registros[indiceRegistro].caudal2 = 0;
+            registros[indiceRegistro].volumen1 = volumenTotal1;
+            registros[indiceRegistro].volumen2 = volumenTotal2;
+            registros[indiceRegistro].valve1_estado = digitalRead(VALVE_CLEAN) ? "ON" : "OFF";
+            registros[indiceRegistro].valve2_estado = digitalRead(VALVE_DIRTY) ? "ON" : "OFF";
+            registros[indiceRegistro].valido = true;
+            indiceRegistro = (indiceRegistro + 1) % MAX_REGISTROS;
+            
+            // Volver a estado inicial y registrar el cambio
+            digitalWrite(VALVE_CLEAN, LOW);
+            digitalWrite(VALVE_DIRTY, HIGH);
+            
+            // Registrar el nuevo estado después del cambio
+            strftime(registros[indiceRegistro].timestamp, 25, "%Y-%m-%d %H:%M:%S", &timeinfo);
+            registros[indiceRegistro].turbidez = voltage;
+            registros[indiceRegistro].calidad = calidad;
+            registros[indiceRegistro].caudal1 = 0;
+            registros[indiceRegistro].caudal2 = 0;
+            registros[indiceRegistro].volumen1 = 0;
+            registros[indiceRegistro].volumen2 = 0;
+            registros[indiceRegistro].valve1_estado = "OFF";  // Nuevo estado
+            registros[indiceRegistro].valve2_estado = "ON";   // Nuevo estado
+            registros[indiceRegistro].valido = true;
+            indiceRegistro = (indiceRegistro + 1) % MAX_REGISTROS;
+            
+            // Forzar un envío inmediato a Google Sheets
+            enviarRegistrosASheet();
+            
+            Serial.println("Reiniciando sistema - Válvulas en posición inicial");
             reiniciarMedicion();
             volumenTotal1 = 0;
             volumenTotal2 = 0;
