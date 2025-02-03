@@ -11,13 +11,17 @@
 #define FLOW_PIN2 35        
 #define VALVE_CLEAN 25      
 #define VALVE_DIRTY 26      
-#define INTERVALO_LECTURA 500
-#define TIEMPO_PROMEDIO 5000
 #define FACTOR_CONVERSION 7.5
-#define TIMEOUT_FLUJO 10000
 
+// Constantes para clasificación del agua
 #define MUY_SUCIA 1.40
 #define ALGO_SUCIA 1.80
+
+// Tiempos y períodos
+#define PERIODO_MEDICION 5000    // 5 segundos de medición inicial
+#define INTERVALO_MUESTREO 100   // 100ms entre muestras durante medición
+#define INTERVALO_ENVIO 10000    // 10 segundos entre envíos
+#define TIMEOUT_FLUJO 10000      // 10 segundos sin flujo para reinicio
 
 #define WIFI_SSID "Pedro891118"
 #define WIFI_PASSWORD "fundacion123@"
@@ -33,6 +37,13 @@ const char spreadsheetId[] = "1HbaVrY4ppDaMRl_sYbsy0PLPeR2vRpdURgByNdfRYq4";
 // Configuración NTP
 const char* ntpServer = "pool.ntp.org";
 
+// Variables para el período de medición
+bool enPeriodoMedicion = false;
+unsigned long inicioPeriodoMedicion = 0;
+float sumaTurbidez = 0;
+int contadorMuestras = 0;
+bool decisionValvulaTomada = false;
+
 // Estructura para almacenar los registros
 struct Registro {
     char timestamp[25];
@@ -42,11 +53,13 @@ struct Registro {
     float caudal2;
     float volumen1;
     float volumen2;
-    bool valido;  // Para marcar si el registro tiene datos válidos
+    String valve1_estado;
+    String valve2_estado;
+    bool valido;
 };
 
-// Array para almacenar registros de 10 segundos
-const int MAX_REGISTROS = 10;  // Máximo 10 registros (1 por segundo)
+// Array para almacenar registros
+const int MAX_REGISTROS = 10;
 Registro registros[MAX_REGISTROS];
 int indiceRegistro = 0;
 
@@ -57,33 +70,17 @@ float volumenTotal1 = 0;
 float volumenTotal2 = 0;
 unsigned long tiempoUltimoFlujo1 = 0;
 unsigned long tiempoUltimoFlujo2 = 0;
-bool mensajeMostrado1 = false;
-bool mensajeMostrado2 = false;
-bool contadorReiniciado1 = false;
-bool contadorReiniciado2 = false;
-
-// Variables para el registro y envío de datos
 unsigned long ultimoEnvio = 0;
 unsigned long ultimoRegistro = 0;
-const unsigned long INTERVALO_ENVIO = 10000;    // 10 segundos
-const unsigned long INTERVALO_REGISTRO = 1000;   // 1 segundo
 
 void IRAM_ATTR contarPulsos1() {
     numPulsos1++;
     tiempoUltimoFlujo1 = millis();
-    if(contadorReiniciado1) {
-        mensajeMostrado1 = false;
-        contadorReiniciado1 = false;
-    }
 }
 
 void IRAM_ATTR contarPulsos2() {
     numPulsos2++;
     tiempoUltimoFlujo2 = millis();
-    if(contadorReiniciado2) {
-        mensajeMostrado2 = false;
-        contadorReiniciado2 = false;
-    }
 }
 
 void obtenerCaudales(float &caudal1, float &caudal2) {
@@ -95,28 +92,10 @@ void obtenerCaudales(float &caudal1, float &caudal2) {
     
     if(caudal1 > 0) {
         volumenTotal1 += caudal1/60;
-        tiempoUltimoFlujo1 = millis();
-    } else if(millis() - tiempoUltimoFlujo1 > TIMEOUT_FLUJO && !contadorReiniciado1) {
-        volumenTotal1 = 0;
-        digitalWrite(VALVE_DIRTY, HIGH);
-        digitalWrite(VALVE_CLEAN, LOW);
-        if(!mensajeMostrado1) {
-            Serial.println("Contador 1 reiniciado después de 10s sin flujo");
-            mensajeMostrado1 = true;
-        }
-        contadorReiniciado1 = true;
     }
-
+    
     if(caudal2 > 0) {
         volumenTotal2 += caudal2/60;
-        tiempoUltimoFlujo2 = millis();
-    } else if(millis() - tiempoUltimoFlujo2 > TIMEOUT_FLUJO && !contadorReiniciado2) {
-        volumenTotal2 = 0;
-        if(!mensajeMostrado2) {
-            Serial.println("Contador 2 reiniciado después de 10s sin flujo");
-            mensajeMostrado2 = true;
-        }
-        contadorReiniciado2 = true;
     }
     
     numPulsos1 = 0;
@@ -127,6 +106,38 @@ String clasificarAgua(float voltage) {
     if(voltage < MUY_SUCIA) return "MUY SUCIA";
     if(voltage < ALGO_SUCIA) return "ALGO SUCIA";
     return "LIMPIA";
+}
+
+void reiniciarMedicion() {
+    enPeriodoMedicion = false;
+    decisionValvulaTomada = false;
+    sumaTurbidez = 0;
+    contadorMuestras = 0;
+    
+    // Al reiniciar, volver al estado por defecto: válvula sucia ON, limpia OFF
+    digitalWrite(VALVE_CLEAN, LOW);
+    digitalWrite(VALVE_DIRTY, HIGH);
+    
+    Serial.println("Sistema reiniciado - Estado por defecto: Válvula sucia ON");
+}
+
+void controlarValvulas(String calidad) {
+    if(calidad == "LIMPIA") {
+        digitalWrite(VALVE_CLEAN, HIGH);   // Válvula limpia ON
+        digitalWrite(VALVE_DIRTY, LOW);    // Válvula sucia OFF
+        Serial.println("Agua limpia detectada - Cambiando a válvula limpia");
+    } else {
+        digitalWrite(VALVE_CLEAN, LOW);    // Válvula limpia OFF
+        digitalWrite(VALVE_DIRTY, HIGH);   // Válvula sucia ON
+        Serial.println("Agua sucia detectada - Manteniendo válvula sucia");
+    }
+    
+    // Verificar que nunca estén ambas válvulas en el mismo estado
+    if(digitalRead(VALVE_CLEAN) == digitalRead(VALVE_DIRTY)) {
+        // Si por algún error están en el mismo estado, forzar estados opuestos
+        digitalWrite(VALVE_CLEAN, !digitalRead(VALVE_DIRTY));
+        Serial.println("ADVERTENCIA: Corrigiendo estado de válvulas");
+    }
 }
 
 void tokenStatusCallback(TokenInfo info) {
@@ -148,8 +159,6 @@ void enviarRegistrosASheet() {
     valueRange.add("majorDimension", "ROWS");
     
     int registrosValidos = 0;
-    
-    // Contar cuántos registros válidos tenemos
     for(int i = 0; i < MAX_REGISTROS; i++) {
         if(registros[i].valido) registrosValidos++;
     }
@@ -161,7 +170,6 @@ void enviarRegistrosASheet() {
     
     Serial.printf("Enviando %d registros\n", registrosValidos);
     
-    // Agregar cada registro válido al JSON
     int indiceValido = 0;
     for(int i = 0; i < MAX_REGISTROS; i++) {
         if(registros[i].valido) {
@@ -172,11 +180,12 @@ void enviarRegistrosASheet() {
             valueRange.set("values/[" + String(indiceValido) + "]/[4]", registros[i].caudal2);
             valueRange.set("values/[" + String(indiceValido) + "]/[5]", registros[i].volumen1);
             valueRange.set("values/[" + String(indiceValido) + "]/[6]", registros[i].volumen2);
+            valueRange.set("values/[" + String(indiceValido) + "]/[7]", registros[i].valve1_estado);
+            valueRange.set("values/[" + String(indiceValido) + "]/[8]", registros[i].valve2_estado);
             indiceValido++;
         }
     }
 
-    // Enviar a Google Sheets
     bool success = GSheet.values.append(&response, spreadsheetId, "Sheet1!A1", &valueRange);
     if (success) {
         Serial.println("Registros enviados exitosamente");
@@ -201,10 +210,13 @@ void setup() {
     pinMode(FLOW_PIN2, INPUT_PULLUP);
     pinMode(VALVE_CLEAN, OUTPUT);
     pinMode(VALVE_DIRTY, OUTPUT);
-    digitalWrite(VALVE_DIRTY, HIGH);
-    digitalWrite(VALVE_CLEAN, LOW);
     
-    // Interrupciones para sensores de flujo
+    // Estado inicial: válvula sucia ON, válvula limpia OFF
+    digitalWrite(VALVE_CLEAN, LOW);
+    digitalWrite(VALVE_DIRTY, HIGH);
+    Serial.println("Estado inicial: Válvula sucia ON, Válvula limpia OFF");
+    
+    // Configurar interrupciones
     attachInterrupt(digitalPinToInterrupt(FLOW_PIN1), contarPulsos1, RISING);
     attachInterrupt(digitalPinToInterrupt(FLOW_PIN2), contarPulsos2, RISING);
 
@@ -237,67 +249,80 @@ void loop() {
     float voltage = analogRead(TURBIDITY_PIN) * (3.3 / 4096.0);
     String calidad = clasificarAgua(voltage);
     
-    // Control de LED según turbidez
-    if(voltage < MUY_SUCIA) {
-        digitalWrite(LED_PIN, HIGH);
-        delay(100);
-        digitalWrite(LED_PIN, LOW);
-    } else if(voltage < ALGO_SUCIA) {
-        digitalWrite(LED_PIN, HIGH);
-        delay(500);
-        digitalWrite(LED_PIN, LOW);
-    } else {
-        digitalWrite(LED_PIN, HIGH);
-        delay(1000);
-        digitalWrite(LED_PIN, LOW);
+    // Detectar inicio de flujo nuevo
+    if((caudal1 > 0 || caudal2 > 0) && !enPeriodoMedicion && !decisionValvulaTomada) {
+        enPeriodoMedicion = true;
+        inicioPeriodoMedicion = currentTime;
+        Serial.println("Iniciando período de medición...");
     }
     
-    // Control de válvulas según calidad
-    if(calidad == "LIMPIA") {
-        digitalWrite(VALVE_CLEAN, HIGH);
-        digitalWrite(VALVE_DIRTY, LOW);
-    } else {
-        digitalWrite(VALVE_CLEAN, LOW);
-        digitalWrite(VALVE_DIRTY, HIGH);
-    }
-    
-    // Registrar datos cada segundo si hay flujo
-    if (currentTime - ultimoRegistro >= INTERVALO_REGISTRO) {
-        ultimoRegistro = currentTime;
-        
-        if(caudal1 > 0 || caudal2 > 0) {
-            // Obtener timestamp
-            time_t now;
-            struct tm timeinfo;
-            time(&now);
-            localtime_r(&now, &timeinfo);
+    // Proceso durante el período de medición
+    if(enPeriodoMedicion) {
+        if(currentTime - inicioPeriodoMedicion < PERIODO_MEDICION) {
+            // Acumular mediciones cada INTERVALO_MUESTREO
+            if(currentTime % INTERVALO_MUESTREO == 0) {
+                sumaTurbidez += voltage;
+                contadorMuestras++;
+                Serial.printf("Muestra %d: %.2fV\n", contadorMuestras, voltage);
+            }
+        } else {
+            // Fin del período de medición
+            float turbidezPromedio = sumaTurbidez / contadorMuestras;
+            String calidadFinal = clasificarAgua(turbidezPromedio);
             
-            // Guardar registro
-            strftime(registros[indiceRegistro].timestamp, 25, "%Y-%m-%d %H:%M:%S", &timeinfo);
-            registros[indiceRegistro].turbidez = voltage;
-            registros[indiceRegistro].calidad = calidad;
-            registros[indiceRegistro].caudal1 = caudal1;
-            registros[indiceRegistro].caudal2 = caudal2;
-            registros[indiceRegistro].volumen1 = volumenTotal1;
-            registros[indiceRegistro].volumen2 = volumenTotal2;
-            registros[indiceRegistro].valido = true;
+            Serial.printf("Fin de medición - Turbidez promedio: %.2f, Calidad: %s\n", 
+                         turbidezPromedio, calidadFinal.c_str());
             
-            Serial.printf("Registro guardado %d: Caudal1=%.2f, Caudal2=%.2f\n", 
-                         indiceRegistro, caudal1, caudal2);
-            
-            indiceRegistro = (indiceRegistro + 1) % MAX_REGISTROS;
+            controlarValvulas(calidadFinal);
+            enPeriodoMedicion = false;
+            decisionValvulaTomada = true;
         }
     }
     
-    // Enviar registros acumulados cada 10 segundos
-    if (currentTime - ultimoEnvio >= INTERVALO_ENVIO) {
+    // Registrar datos cada segundo si hay flujo
+    if((caudal1 > 0 || caudal2 > 0) && currentTime - ultimoRegistro >= 1000) {
+        ultimoRegistro = currentTime;
+        
+        // Obtener timestamp
+        time_t now;
+        struct tm timeinfo;
+        time(&now);
+        localtime_r(&now, &timeinfo);
+        
+        // Guardar registro
+        strftime(registros[indiceRegistro].timestamp, 25, "%Y-%m-%d %H:%M:%S", &timeinfo);
+        registros[indiceRegistro].turbidez = voltage;
+        registros[indiceRegistro].calidad = calidad;
+        registros[indiceRegistro].caudal1 = caudal1;
+        registros[indiceRegistro].caudal2 = caudal2;
+        registros[indiceRegistro].volumen1 = volumenTotal1;
+        registros[indiceRegistro].volumen2 = volumenTotal2;
+        registros[indiceRegistro].valve1_estado = digitalRead(VALVE_CLEAN) ? "ON" : "OFF";
+        registros[indiceRegistro].valve2_estado = digitalRead(VALVE_DIRTY) ? "ON" : "OFF";
+        registros[indiceRegistro].valido = true;
+        
+        Serial.printf("Registro guardado %d: Caudal1=%.2f, Caudal2=%.2f\n", 
+                     indiceRegistro, caudal1, caudal2);
+        
+        indiceRegistro = (indiceRegistro + 1) % MAX_REGISTROS;
+    }
+    
+    // Enviar datos acumulados cada 10 segundos
+    if(currentTime - ultimoEnvio >= INTERVALO_ENVIO) {
         ultimoEnvio = currentTime;
         enviarRegistrosASheet();
     }
     
-    // Imprimir datos en Serial
-    Serial.printf("Turbidez=%.2fV (%s), Caudal1=%.2fL/m, Caudal2=%.2fL/m\n", 
-                 voltage, calidad.c_str(), caudal1, caudal2);
-                 
+    // Detectar fin de flujo y reiniciar estado
+    if(caudal1 == 0 && caudal2 == 0 && decisionValvulaTomada) {
+        if(currentTime - tiempoUltimoFlujo1 > TIMEOUT_FLUJO && 
+           currentTime - tiempoUltimoFlujo2 > TIMEOUT_FLUJO) {
+            Serial.println("Flujo detenido - Reiniciando estado");
+            reiniciarMedicion();
+            volumenTotal1 = 0;
+            volumenTotal2 = 0;
+        }
+    }
+    
     delay(100); // Pequeña pausa para estabilidad
 }
